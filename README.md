@@ -13,6 +13,12 @@
 
 ## Directives
 
+***dongting_log_escape_non_ascii***
+  
+    dongting_log_escape_non_ascii off ...
+
+  * default value is *on*.
+
 ***dongting_format***
   
     dongting_format name string ...
@@ -27,7 +33,6 @@
     dongting_log off;
     
   * default value is *off*.
-  * command does not need the pipe symbol `|` prefix.
 
 ## Example
 

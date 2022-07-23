@@ -79,6 +79,8 @@ typedef struct {
     time_t                      open_file_cache_valid;
     ngx_uint_t                  open_file_cache_min_uses;
 
+    ngx_flag_t                  escape_non_ascii;
+
     ngx_uint_t                  off;        /* unsigned  off:1 */
 } ngx_http_log_loc_conf_t;
 
@@ -136,7 +138,9 @@ static size_t ngx_http_log_variable_getlen(ngx_http_request_t *r,
     uintptr_t data);
 static u_char *ngx_http_log_variable(ngx_http_request_t *r, u_char *buf,
     ngx_http_log_op_t *op);
-static uintptr_t ngx_http_log_escape(u_char *dst, u_char *src, size_t size);
+static uintptr_t ngx_http_log_escape(ngx_http_log_loc_conf_t *lcf, u_char *dst,
+    u_char *src, size_t size);
+
 static size_t ngx_http_log_json_variable_getlen(ngx_http_request_t *r,
     uintptr_t data);
 static u_char *ngx_http_log_json_variable(ngx_http_request_t *r, u_char *buf,
@@ -185,6 +189,14 @@ static ngx_command_t  ngx_http_log_commands[] = {
       0,
       NULL },
 
+    { ngx_string("dongting_log_escape_non_ascii"),
+      NGX_HTTP_MAIN_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_log_loc_conf_t, escape_non_ascii),
+      NULL },
+
+
       ngx_null_command
 };
 
@@ -220,14 +232,12 @@ ngx_module_t  ngx_http_dongting_module = {
 };
 
 
-static ngx_str_t  ngx_http_access_log = ngx_string(NGX_HTTP_LOG_PATH);
+static ngx_str_t  ngx_http_dev_null_log = ngx_string("/dev/null");
 
 
 static ngx_str_t  ngx_http_combined_fmt =
-    ngx_string("$remote_addr - $remote_user [$time_local] "
-               "\"$request\" $status $body_bytes_sent "
-               "\"$http_referer\" \"$http_user_agent\"");
-
+    ngx_string("$remote_addr [$time_local] "
+               "\"$request\" $status");
 
 static ngx_http_log_var_t  ngx_http_log_vars[] = {
     { ngx_string("pipe"), 1, ngx_http_log_pipe },
@@ -950,6 +960,7 @@ static size_t
 ngx_http_log_variable_getlen(ngx_http_request_t *r, uintptr_t data)
 {
     uintptr_t                   len;
+    ngx_http_log_loc_conf_t    *lcf;
     ngx_http_variable_value_t  *value;
 
     value = ngx_http_get_indexed_variable(r, data);
@@ -958,7 +969,9 @@ ngx_http_log_variable_getlen(ngx_http_request_t *r, uintptr_t data)
         return 1;
     }
 
-    len = ngx_http_log_escape(NULL, value->data, value->len);
+    lcf = ngx_http_get_module_loc_conf(r, ngx_http_dongting_module);
+
+    len = ngx_http_log_escape(lcf, NULL, value->data, value->len);
 
     value->escape = len ? 1 : 0;
 
@@ -969,6 +982,7 @@ ngx_http_log_variable_getlen(ngx_http_request_t *r, uintptr_t data)
 static u_char *
 ngx_http_log_variable(ngx_http_request_t *r, u_char *buf, ngx_http_log_op_t *op)
 {
+    ngx_http_log_loc_conf_t    *lcf;
     ngx_http_variable_value_t  *value;
 
     value = ngx_http_get_indexed_variable(r, op->data);
@@ -982,13 +996,15 @@ ngx_http_log_variable(ngx_http_request_t *r, u_char *buf, ngx_http_log_op_t *op)
         return ngx_cpymem(buf, value->data, value->len);
 
     } else {
-        return (u_char *) ngx_http_log_escape(buf, value->data, value->len);
+        lcf = ngx_http_get_module_loc_conf(r, ngx_http_dongting_module);
+        return (u_char *) ngx_http_log_escape(lcf, buf, value->data, value->len);
     }
 }
 
 
 static uintptr_t
-ngx_http_log_escape(u_char *dst, u_char *src, size_t size)
+ngx_http_log_escape(ngx_http_log_loc_conf_t *lcf, u_char *dst, u_char *src,
+    size_t size)
 {
     ngx_uint_t      n;
     static u_char   hex[] = "0123456789ABCDEF";
@@ -1011,6 +1027,11 @@ ngx_http_log_escape(u_char *dst, u_char *src, size_t size)
         0xffffffff, /* 1111 1111 1111 1111  1111 1111 1111 1111 */
     };
 
+    if (lcf->escape_non_ascii) {
+        ngx_memset(&escape[4], 0xff, sizeof(uint32_t) * 4);
+    } else {
+        ngx_memzero(&escape[4], sizeof(uint32_t) * 4);
+    }
 
     if (dst == NULL) {
 
@@ -1144,7 +1165,7 @@ ngx_http_log_create_main_conf(ngx_conf_t *cf)
         return NULL;
     }
 
-    ngx_str_set(&fmt->name, "combined");
+    ngx_str_set(&fmt->name, "dongting_combined");
 
     fmt->flushes = NULL;
 
@@ -1168,6 +1189,7 @@ ngx_http_log_create_loc_conf(ngx_conf_t *cf)
     }
 
     conf->open_file_cache = NGX_CONF_UNSET_PTR;
+    conf->escape_non_ascii = NGX_CONF_UNSET;
 
     return conf;
 }
@@ -1182,6 +1204,8 @@ ngx_http_log_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_http_log_t            *log;
     ngx_http_log_fmt_t        *fmt;
     ngx_http_log_main_conf_t  *lmcf;
+
+    ngx_conf_merge_value(conf->escape_non_ascii, prev->escape_non_ascii, 1);
 
     if (conf->open_file_cache == NGX_CONF_UNSET_PTR) {
 
@@ -1217,7 +1241,7 @@ ngx_http_log_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 
     ngx_memzero(log, sizeof(ngx_http_log_t));
 
-    log->file = ngx_conf_open_file(cf->cycle, &ngx_http_access_log);
+    log->file = ngx_conf_open_file(cf->cycle, &ngx_http_dev_null_log);
     if (log->file == NULL) {
         return NGX_CONF_ERROR;
     }
@@ -1252,6 +1276,11 @@ ngx_http_log_set_log(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_http_compile_complex_value_t   ccv;
 
     value = cf->args->elts;
+
+    if (! value) {
+        llcf->off = 1;
+        return NGX_CONF_OK;
+    }
 
     if (ngx_strcmp(value[1].data, "off") == 0) {
         llcf->off = 1;
@@ -1335,12 +1364,12 @@ process_formats:
     if (cf->args->nelts >= 3) {
         name = value[2];
 
-        if (ngx_strcmp(name.data, "combined") == 0) {
+        if (ngx_strcmp(name.data, "dongting_combined") == 0) {
             lmcf->combined_used = 1;
         }
 
     } else {
-        ngx_str_set(&name, "combined");
+        ngx_str_set(&name, "dongting_combined");
         lmcf->combined_used = 1;
     }
 
